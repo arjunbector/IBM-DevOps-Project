@@ -1,0 +1,88 @@
+---
+- name: Deploy Flask Application
+  hosts: localhost
+  become: yes
+  vars:
+    app_directory: "/opt/{{ app_name }}"
+  tasks:
+    - name: Create application directory
+      file:
+        path: "{{ app_directory }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy application files
+      synchronize:
+        src: "{{ playbook_dir }}/../"
+        dest: "{{ app_directory }}/"
+        rsync_opts:
+          - "--exclude=.git"
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+          - "--exclude=venv"
+          - "--exclude=.pytest_cache"
+
+    - name: Install Docker
+      apt:
+        name: 
+          - docker.io
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_env.USER | default(ansible_user_id) }}"
+        groups: docker
+        append: yes
+      when: ansible_env.USER is defined or ansible_user_id is defined
+
+    - name: Stop all running containers
+      shell: docker stop $(docker ps -q) || true
+      ignore_errors: yes
+
+    - name: Remove all containers
+      shell: docker rm $(docker ps -aq) || true
+      ignore_errors: yes
+
+    - name: Stop existing docker compose services
+      shell: |
+        cd {{ app_directory }}
+        docker compose -f docker/docker-compose.yml down --remove-orphans || true
+      ignore_errors: yes
+
+    - name: Check and kill processes on port 9090
+      shell: |
+        if lsof -Pi :9090 -sTCP:LISTEN -t >/dev/null; then
+          echo "Port 9090 is in use, killing processes..."
+          lsof -ti:9090 | xargs kill -9 || true
+        else
+          echo "Port 9090 is available"
+        fi
+      ignore_errors: yes
+
+    - name: Build and start containers
+      shell: |
+        cd {{ app_directory }}
+        docker compose -f docker/docker-compose.yml up -d --build
+
+    - name: Wait for application to be ready
+      uri:
+        url: "http://localhost:{{ app_port }}/health"
+        method: GET
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 30
+      delay: 2
+
+    - name: Display deployment status
+      debug:
+        msg: "Application deployed successfully and is healthy!"

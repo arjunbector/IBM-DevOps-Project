@@ -1,0 +1,99 @@
+pipeline {
+    agent any
+
+    environment {
+        APP_NAME = 'flask-devops-pipeline'
+        APP_PORT = '5000'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out code...'
+                checkout scm
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps { 
+                echo 'Installing dependencies...'
+                sh '''
+                    python3 -m pip install --user -r requirements.txt
+                '''
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                echo 'Building Docker image...'
+                sh '''
+                    docker build -t $APP_NAME:latest -f docker/Dockerfile .
+                '''
+            }
+        }
+
+        stage('Deploy with Ansible') {
+            steps {
+                echo 'Deploying application with Ansible...'
+                sh '''
+                    cd ansible
+                    if [ -f playbook.yml ]; then
+                        ansible-playbook -i inventory.yml playbook.yml -e app_name=$APP_NAME -e app_port=$APP_PORT
+                    else
+                        echo "Playbook not found"
+                        exit 1
+                    fi
+                '''
+            }
+        }
+
+        stage('Health Check') {
+            steps {
+                echo 'Performing health check...'
+                script {
+                    def maxRetries = 30
+                    def retryCount = 0
+                    def healthCheckPassed = false
+
+                    while (retryCount < maxRetries && !healthCheckPassed) {
+                        try {
+                            sh 'curl -f http://localhost:$APP_PORT/health'
+                            healthCheckPassed = true
+                            echo 'Health check passed!'
+                        } catch (Exception e) {
+                            retryCount++
+                            echo "Health check attempt ${retryCount}/${maxRetries} failed, retrying in 5 seconds..."
+                            sleep(5)
+                        }
+                    }
+
+                    if (!healthCheckPassed) {
+                        error('Health check failed after maximum retries')
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Pipeline completed'
+        }
+        success {
+            echo 'Pipeline succeeded!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+            sh '''
+                echo "Collecting logs for debugging..."
+                docker logs $(docker ps -q --filter "ancestor=$APP_NAME:latest") || true
+            '''
+        }
+        cleanup {
+            echo 'Cleaning up...'
+            sh '''
+                docker system prune -f || true
+            '''
+        }
+    }
+}
